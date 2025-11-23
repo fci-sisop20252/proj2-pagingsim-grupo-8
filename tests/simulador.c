@@ -6,31 +6,31 @@
 typedef struct {
     int frame;
     bool valid;
-    bool referenced; 
+    bool referenced;
 } PageTableEntry;
 
 typedef struct {
-    int pid;   
-    int page;     
+    int pid;
+    int page;
     bool referenced;
 } PhysicalFrame;
 
-PhysicalFrame *frames;     
-PageTableEntry **pageTables;   
-int *freeFrames;            
-int freeFrameCount;          
-int totalFrames;           
-int pageSize;                 
-int processCount;          
-int clockPointer;            
-int totalAccesses;          
-int totalPageFaults;      
+PhysicalFrame *frames;
+PageTableEntry **pageTables;
+int *freeFrames;
+int freeFrameCount;
+int totalFrames;
+int pageSize;
+int processCount;
+int clockPointer;
+int totalAccesses;
+int totalPageFaults;
 
 void readConfig(const char *filename);
 void initializeSimulation();
 void processAccesses(const char *filename, const char *algorithm);
 void handleAccess(int pid, int address, const char *algorithm);
-void handlePageFault(int pid, int page, const char *algorithm);
+int handlePageFault(int pid, int page, const char *algorithm, int *oldPid, int *oldPage);
 int findFreeFrame();
 int fifoReplacement();
 int clockReplacement();
@@ -38,7 +38,7 @@ void updatePageTable(int pid, int page, int frame, bool referenced);
 void printHit(int pid, int address, int page, int offset, int frame);
 void printPageFaultFree(int pid, int address, int page, int offset, int frame);
 void printPageFaultReplace(int pid, int address, int page, int offset, 
-                          int oldPid, int oldPage, int frame);
+                           int oldPid, int oldPage, int frame);
 
 int main(int argc, char *argv[]) {
     if (argc != 4) {
@@ -50,27 +50,24 @@ int main(int argc, char *argv[]) {
     const char *configFile = argv[2];
     const char *accessFile = argv[3];
 
-  
     if (strcmp(algorithm, "fifo") != 0 && strcmp(algorithm, "clock") != 0) {
         printf("Erro: Algoritmo deve ser 'fifo' ou 'clock'\n");
         return 1;
     }
 
-   
     readConfig(configFile);
     initializeSimulation();
 
- 
     processAccesses(accessFile, algorithm);
 
-    
-    printf("--- Simulação Finalizada (Algoritmo: %s)\n", algorithm);
+    printf("\n--- Simulação Finalizada (Algoritmo: %s)\n", algorithm);
     printf("Total de Acessos: %d\n", totalAccesses);
     printf("Total de Page Faults: %d\n", totalPageFaults);
 
-   
     for (int i = 0; i < processCount; i++) {
-        free(pageTables[i]);
+        if (pageTables[i] != NULL) {
+             free(pageTables[i]);
+        }
     }
     free(pageTables);
     free(frames);
@@ -86,24 +83,44 @@ void readConfig(const char *filename) {
         exit(1);
     }
 
-    fscanf(file, "%d", &totalFrames);
-    fscanf(file, "%d", &pageSize);
-    fscanf(file, "%d", &processCount);
+    if (fscanf(file, "%d", &totalFrames) != 1 ||
+        fscanf(file, "%d", &pageSize) != 1 ||
+        fscanf(file, "%d", &processCount) != 1) {
+        printf("Erro ao ler parâmetros iniciais do arquivo de configuração.\n");
+        fclose(file);
+        exit(1);
+    }
 
     pageTables = malloc(processCount * sizeof(PageTableEntry*));
+
+    if (!pageTables) {
+        perror("Erro de alocação de memória para pageTables");
+        fclose(file);
+        exit(1);
+    }
     
     for (int i = 0; i < processCount; i++) {
         int pid, virtualSize;
-        fscanf(file, "%d %d", &pid, &virtualSize);
+        if (fscanf(file, "%d %d", &pid, &virtualSize) != 2) {
+             printf("Erro ao ler dados do processo %d no arquivo de configuração.\n", i);
+             fclose(file);
+             exit(1);
+        }
         
         int pageCount = (virtualSize + pageSize - 1) / pageSize;
         
-        pageTables[pid] = malloc(pageCount * sizeof(PageTableEntry));
+        pageTables[i] = malloc(pageCount * sizeof(PageTableEntry));
         
+        if (pageTables[i] == NULL) {
+            perror("Erro de alocação de memória para Tabela de Páginas");
+            fclose(file);
+            exit(1);
+        }
+
         for (int j = 0; j < pageCount; j++) {
-            pageTables[pid][j].frame = -1;
-            pageTables[pid][j].valid = false;
-            pageTables[pid][j].referenced = false;
+            pageTables[i][j].frame = -1;
+            pageTables[i][j].valid = false;
+            pageTables[i][j].referenced = false;
         }
     }
 
@@ -114,11 +131,16 @@ void initializeSimulation() {
     frames = malloc(totalFrames * sizeof(PhysicalFrame));
     freeFrames = malloc(totalFrames * sizeof(int));
     
+    if (!frames || !freeFrames) {
+        perror("Erro de alocação de memória para frames ou freeFrames");
+        exit(1);
+    }
+
     for (int i = 0; i < totalFrames; i++) {
         frames[i].pid = -1;
         frames[i].page = -1;
         frames[i].referenced = false;
-        freeFrames[i] = i;  
+        freeFrames[i] = i;
     }
     
     freeFrameCount = totalFrames;
@@ -136,6 +158,13 @@ void processAccesses(const char *filename, const char *algorithm) {
 
     int pid, address;
     while (fscanf(file, "%d %d", &pid, &address) == 2) {
+        if (pid < 0 || pid >= processCount) {
+             printf("Erro: PID %d inválido, ignorando acesso.\n", pid);
+             continue;
+        }
+
+        int max_pages = 0;
+        
         handleAccess(pid, address, algorithm);
     }
 
@@ -157,15 +186,24 @@ void handleAccess(int pid, int address, const char *algorithm) {
         printHit(pid, address, page, offset, frame);
     } else {
         totalPageFaults++;
-        handlePageFault(pid, page, algorithm);
         
-        int frame = pageTables[pid][page].frame;
-        printPageFaultFree(pid, address, page, offset, frame);
+        int oldPid = -1, oldPage = -1;
+        
+        int frame = handlePageFault(pid, page, algorithm, &oldPid, &oldPage);
+
+        if (oldPid != -1) {
+            printPageFaultReplace(pid, address, page, offset, oldPid, oldPage, frame);
+        } else {
+            printPageFaultFree(pid, address, page, offset, frame);
+        }
     }
 }
 
-void handlePageFault(int pid, int page, const char *algorithm) {
+int handlePageFault(int pid, int page, const char *algorithm, int *oldPid, int *oldPage) {
     int frame;
+
+    *oldPid = -1;
+    *oldPage = -1;
     
     if (freeFrameCount > 0) {
         frame = findFreeFrame();
@@ -176,15 +214,16 @@ void handlePageFault(int pid, int page, const char *algorithm) {
             frame = clockReplacement();
         }
         
-        int oldPid = frames[frame].pid;
-        int oldPage = frames[frame].page;
-        pageTables[oldPid][oldPage].valid = false;
+        *oldPid = frames[frame].pid;
+        *oldPage = frames[frame].page;
         
-        printf(" -> Memória cheia. Página %d (PID %d) (Frame %d) será desalocada.", 
-               oldPage, oldPid, frame);
+        pageTables[*oldPid][*oldPage].valid = false;
+        pageTables[*oldPid][*oldPage].referenced = false;
     }
     
     updatePageTable(pid, page, frame, true);
+    
+    return frame;
 }
 
 int findFreeFrame() {
@@ -195,10 +234,10 @@ int findFreeFrame() {
 }
 
 int fifoReplacement() {
-    static int fifoPointer = 0;
-    fifoPointer = (fifoPointer + 1) % totalFrames;
-    int frame = fifoPointer;
-    return frame;
+    int victimFrame = clockPointer;
+    clockPointer = (clockPointer + 1) % totalFrames;
+    
+    return victimFrame;
 }
 
 int clockReplacement() {
@@ -209,6 +248,8 @@ int clockReplacement() {
             return victim;
         } else {
             frames[clockPointer].referenced = false;
+            pageTables[frames[clockPointer].pid][frames[clockPointer].page].referenced = false; 
+
             clockPointer = (clockPointer + 1) % totalFrames;
         }
     }
@@ -225,17 +266,16 @@ void updatePageTable(int pid, int page, int frame, bool referenced) {
 }
 
 void printHit(int pid, int address, int page, int offset, int frame) {
-    printf("Acesso: PID %d, Endereço %d (Página %d, Deslocamento %d) -> HIT: Página %d (PID %d) já está no Frame %d\n",
+    printf("Acesso: PID %d, Endereço %d (Página %d, Deslocamento %d) -> HIT: Página %d (PID %d) já está no Frame %d\n", 
            pid, address, page, offset, page, pid, frame);
 }
 
 void printPageFaultFree(int pid, int address, int page, int offset, int frame) {
-    printf("Acesso: PID %d, Endereço %d (Página %d, Deslocamento %d) -> PAGE FAULT -> Página %d (PID %d) alocada no Frame livre %d\n",
+    printf("Acesso: PID %d, Endereço %d (Página %d, Deslocamento %d) -> PAGE FAULT -> Página %d (PID %d) alocada no Frame livre %d\n", 
            pid, address, page, offset, page, pid, frame);
 }
 
-void printPageFaultReplace(int pid, int address, int page, int offset, 
-                          int oldPid, int oldPage, int frame) {
+void printPageFaultReplace(int pid, int address, int page, int offset, int oldPid, int oldPage, int frame) {
     printf("Acesso: PID %d, Endereço %d (Página %d, Deslocamento %d) -> PAGE FAULT -> Memória cheia. Página %d (PID %d) (Frame %d) será desalocada. -> Página %d (PID %d) alocada no Frame %d\n",
            pid, address, page, offset, oldPage, oldPid, frame, page, pid, frame);
 }
