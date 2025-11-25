@@ -3,274 +3,263 @@
 #include <string.h>
 #include <stdbool.h>
 
+// Estrutura para entrada da tabela de páginas
 typedef struct {
-    int frame;
-    bool valid;
-    bool referenced;
-} PageTableEntry;
-
+    int frame;        // Número do frame físico
+    bool valido;       // Bit de validade
+    bool referenciado; // Bit de referência (R-bit)
+} EntradaTabelaPaginas;
+// Estrutura para quadro físico
 typedef struct {
-    int pid;
-    int page;
-    bool referenced;
-} PhysicalFrame;
-
-PhysicalFrame *frames;
-PageTableEntry **pageTables;
-//int *freeFrames;
-int freeFrameCount;
+    int pid;           // ID do processo que ocupa o frame
+    int pagina;        // Número da página virtual
+    bool referenciado; // Bit de referência (R-bit)
+} FrameFisico;
+// Variáveis globais
+FrameFisico *frames;
+EntradaTabelaPaginas **tabelasPaginas;
+int contadorFrameLivres;
 int totalFrames;
-int pageSize;
-int processCount;
-int clockPointer;
-int totalAccesses;
+int tamanhoPagina;
+int numeroProcessos;
+int ponteiroClock;
+int totalAcessos;
 int totalPageFaults;
 
-void readConfig(const char *filename);
-void initializeSimulation();
-void processAccesses(const char *filename, const char *algorithm);
-void handleAccess(int pid, int address, const char *algorithm);
-int handlePageFault(int pid, int page, const char *algorithm, int *oldPid, int *oldPage);
-//int findFreeFrame();
-int fifoReplacement();
-int clockReplacement();
-void updatePageTable(int pid, int page, int frame, bool referenced);
-void printHit(int pid, int address, int page, int offset, int frame);
-void printPageFaultFree(int pid, int address, int page, int offset, int frame);
-void printPageFaultReplace(int pid, int address, int page, int offset, 
-                           int oldPid, int oldPage, int frame);
-
+// Declarações de funções
+void lerConfiguracao(const char *nomeArquivo);
+void inicializarSimulacao();
+void processarAcessos(const char *nomeArquivo, const char *algoritmo);
+void tratarAcesso(int pid, int endereco, const char *algoritmo);
+int tratarPageFault(int pid, int pagina, const char *algoritmo, int *pidAntigo, int *paginaAntiga);
+int substituicaoFIFO();
+int substituicaoClock();
+void atualizarTabelaPaginas(int pid, int pagina, int frame, bool referenciado);
+void imprimirHit(int pid, int endereco, int pagina, int deslocamento, int frame);
+void imprimirPageFaultLivre(int pid, int endereco, int pagina, int deslocamento, int frame);
+void imprimirPageFaultSubstituicao(int pid, int endereco, int pagina, int deslocamento, 
+                                   int pidAntigo, int paginaAntiga, int frame);
+                                   
 int main(int argc, char *argv[]) {
     if (argc != 4) {
         printf("Uso: %s <fifo|clock> <arquivo_config> <arquivo_acessos>\n", argv[0]);
         return 1;
     }
-
-    const char *algorithm = argv[1];
-    const char *configFile = argv[2];
-    const char *accessFile = argv[3];
-
-    if (strcmp(algorithm, "fifo") != 0 && strcmp(algorithm, "clock") != 0) {
+    const char *algoritmo = argv[1];
+    const char *arquivoConfig = argv[2];
+    const char *arquivoAcessos = argv[3];
+    if (strcmp(algoritmo, "fifo") != 0 && strcmp(algoritmo, "clock") != 0) {
         printf("Erro: Algoritmo deve ser 'fifo' ou 'clock'\n");
         return 1;
     }
 
-    readConfig(configFile);
-    initializeSimulation();
-
-    processAccesses(accessFile, algorithm);
-
-    printf("--- Simulação Finalizada (Algoritmo: %s)\n", algorithm);
-    printf("Total de Acessos: %d\n", totalAccesses);
+    lerConfiguracao(arquivoConfig);
+    inicializarSimulacao();
+    processarAcessos(arquivoAcessos, algoritmo);
+    printf("--- Simulação Finalizada (Algoritmo: %s)\n", algoritmo);
+    printf("Total de Acessos: %d\n", totalAcessos);
     printf("Total de Page Faults: %d\n", totalPageFaults);
-
-    for (int i = 0; i < processCount; i++) {
-        if (pageTables[i] != NULL) {
-             free(pageTables[i]);
+    // Liberar memória
+    for (int i = 0; i < numeroProcessos; i++) {
+        if (tabelasPaginas[i] != NULL) {
+             free(tabelasPaginas[i]);
         }
     }
-    free(pageTables);
+    free(tabelasPaginas);
     free(frames);
-    //free(freeFrames);
-
     return 0;
 }
 
-void readConfig(const char *filename) {
-    FILE *file = fopen(filename, "r");
-    if (!file) {
-        printf("Erro: Não foi possível abrir o arquivo de configuração %s\n", filename);
+void lerConfiguracao(const char *nomeArquivo) {
+    FILE *arquivo = fopen(nomeArquivo, "r");
+    if (!arquivo) {
+        printf("Erro: Não foi possível abrir o arquivo de configuração %s\n", nomeArquivo);
         exit(1);
     }
-
-    if (fscanf(file, "%d", &totalFrames) != 1 ||
-        fscanf(file, "%d", &pageSize) != 1 ||
-        fscanf(file, "%d", &processCount) != 1) {
+    if (fscanf(arquivo, "%d", &totalFrames) != 1 ||
+        fscanf(arquivo, "%d", &tamanhoPagina) != 1 ||
+        fscanf(arquivo, "%d", &numeroProcessos) != 1) {
         printf("Erro ao ler parâmetros iniciais do arquivo de configuração.\n");
-        fclose(file);
+        fclose(arquivo);
         exit(1);
     }
-
-    pageTables = malloc(processCount * sizeof(PageTableEntry*));
-
-    if (!pageTables) {
+    tabelasPaginas = malloc(numeroProcessos * sizeof(EntradaTabelaPaginas*));
+    if (!tabelasPaginas) {
         perror("Erro de alocação de memória para pageTables");
-        fclose(file);
+        fclose(arquivo);
         exit(1);
     }
     
-    for (int i = 0; i < processCount; i++) {
-        int pid, virtualSize;
-        if (fscanf(file, "%d %d", &pid, &virtualSize) != 2) {
+    for (int i = 0; i < numeroProcessos; i++) {
+        int pid, tamanhoVirtual;
+        if (fscanf(arquivo, "%d %d", &pid, &tamanhoVirtual) != 2) {
              printf("Erro ao ler dados do processo %d no arquivo de configuração.\n", i);
-             fclose(file);
+             fclose(arquivo);
              exit(1);
         }
-        
-        int pageCount = (virtualSize + pageSize - 1) / pageSize;
-        
-        pageTables[i] = malloc(pageCount * sizeof(PageTableEntry));
-        
-        if (pageTables[i] == NULL) {
+        int numeroPaginas = (tamanhoVirtual + tamanhoPagina - 1) / tamanhoPagina;
+        tabelasPaginas[i] = malloc(numeroPaginas * sizeof(EntradaTabelaPaginas));
+        if (tabelasPaginas[i] == NULL) {
             perror("Erro de alocação de memória para Tabela de Páginas");
-            fclose(file);
+            fclose(arquivo);
             exit(1);
         }
-
-        for (int j = 0; j < pageCount; j++) {
-            pageTables[i][j].frame = -1;
-            pageTables[i][j].valid = false;
-            pageTables[i][j].referenced = false;
+// Inicializar todas as entradas da tabela de páginas
+        for (int j = 0; j < numeroPaginas; j++) {
+            tabelasPaginas[i][j].frame = -1;
+            tabelasPaginas[i][j].valido = false;
+            tabelasPaginas[i][j].referenciado  = false;
         }
     }
-
-    fclose(file);
+    fclose(arquivo);
 }
 
-void initializeSimulation() {
-    frames = malloc(totalFrames * sizeof(PhysicalFrame));
-    //freeFrames = malloc(totalFrames * sizeof(int));
+void inicializarSimulacao() {
+    frames = malloc(totalFrames * sizeof(FrameFisico));
     
     if (!frames) {
         perror("Erro de alocação de memória para frames ou freeFrames");
         exit(1);
     }
-
+// Inicializar todos os frame como livres
     for (int i = 0; i < totalFrames; i++) {
         frames[i].pid = -1;
-        frames[i].page = -1;
-        frames[i].referenced = false;
-        //freeFrames[i] = i;
+        frames[i].pagina = -1;
+        frames[i].referenciado = false;
     }
     
-    freeFrameCount = totalFrames;
-    clockPointer = 0;
-    totalAccesses = 0;
+    contadorFrameLivres = totalFrames;
+    ponteiroClock = 0;
+    totalAcessos = 0;
     totalPageFaults = 0;
 }
 
-void processAccesses(const char *filename, const char *algorithm) {
-    FILE *file = fopen(filename, "r");
-    if (!file) {
-        printf("Erro: Não foi possível abrir o arquivo de acessos %s\n", filename);
+void processarAcessos(const char *nomeArquivo, const char *algoritmo) {
+    FILE *arquivo = fopen(nomeArquivo, "r");
+    if (!arquivo) {
+        printf("Erro: Não foi possível abrir o arquivo de acessos %s\n", nomeArquivo);
         exit(1);
     }
 
-    int pid, address;
-    while (fscanf(file, "%d %d", &pid, &address) == 2) {
-        if (pid < 0 || pid >= processCount) {
+    int pid, endereco;
+    while (fscanf(arquivo, "%d %d", &pid, &endereco) == 2) {
+        if (pid < 0 || pid >= numeroProcessos) {
              printf("Erro: PID %d inválido, ignorando acesso.\n", pid);
              continue;
         }
 
         int max_pages = 0;
         
-        handleAccess(pid, address, algorithm);
+        tratarAcesso(pid, endereco, algoritmo);
     }
 
-    fclose(file);
+    fclose(arquivo);
 }
 
-void handleAccess(int pid, int address, const char *algorithm) {
-    totalAccesses++;
-    
-    int page = address / pageSize;
-    int offset = address % pageSize;
-    
-    if (pageTables[pid][page].valid) {
-        int frame = pageTables[pid][page].frame;
+void tratarAcesso(int pid, int endereco, const char *algoritmo) {
+    totalAcessos++;
+    // Traduzir endereço virtual em número de página e deslocamento
+    int pagina = endereco / tamanhoPagina;
+    int deslocamento = endereco % tamanhoPagina;
+    // Verificar se a página está na memória
+    if (tabelasPaginas[pid][pagina].valido) {
+        // HIT - Página já está na memória
+        int frame = tabelasPaginas[pid][pagina].frame;
         
-        pageTables[pid][page].referenced = true;
-        frames[frame].referenced = true;
+        // Atualizar bit de referência
+        tabelasPaginas[pid][pagina].referenciado = true;
+        frames[frame].referenciado = true;
         
-        printHit(pid, address, page, offset, frame);
+        imprimirHit(pid, endereco, pagina, deslocamento, frame);
     } else {
         totalPageFaults++;
         
-        int oldPid = -1, oldPage = -1;
+        int pidAntigo = -1, paginaAntiga = -1;
         
-        int frame = handlePageFault(pid, page, algorithm, &oldPid, &oldPage);
+        int frame = tratarPageFault(pid, pagina, algoritmo, &pidAntigo, &paginaAntiga);
 
-        if (oldPid != -1) {
-            printPageFaultReplace(pid, address, page, offset, oldPid, oldPage, frame);
-        } else {
-            printPageFaultFree(pid, address, page, offset, frame);
+        if (pidAntigo != -1) { // Substituição de página
+            imprimirPageFaultSubstituicao(pid, endereco, pagina, deslocamento, pidAntigo, paginaAntiga, frame);
+        } else { // Alocação em frame livre
+            imprimirPageFaultLivre(pid, endereco, pagina, deslocamento, frame);
         }
     }
 }
 
-int handlePageFault(int pid, int page, const char *algorithm, int *oldPid, int *oldPage) {
+int tratarPageFault(int pid, int pagina, const char *algoritmo, int *pidAntigo, int *paginaAntiga) {
     int frame;
 
-    *oldPid = -1;
-    *oldPage = -1;
+    *pidAntigo = -1;
+    *paginaAntiga = -1;
     
-    if (freeFrameCount > 0) {
-        frame = clockPointer;
-        clockPointer = (clockPointer + 1) % totalFrames; 
-        freeFrameCount--;
-    } else {
-        if (strcmp(algorithm, "fifo") == 0) {
-            frame = fifoReplacement();
+    if (contadorFrameLivres > 0) { 
+        frame = ponteiroClock;
+        ponteiroClock = (ponteiroClock + 1) % totalFrames; 
+        contadorFrameLivres--;
+    } else { // Memória cheia, aplicar algoritmo de substituição
+        if (strcmp(algoritmo, "fifo") == 0) {
+            frame = substituicaoFIFO();
         } else {
-            frame = clockReplacement();
+            frame = substituicaoClock();
         }
-        
-        *oldPid = frames[frame].pid;
-        *oldPage = frames[frame].page;
-        
-        pageTables[*oldPid][*oldPage].valid = false;
-        pageTables[*oldPid][*oldPage].referenced = false;
-    }
     
-    updatePageTable(pid, page, frame, true);
+        // Registrar informações da página substituída
+        *pidAntigo = frames[frame].pid;
+        *paginaAntiga = frames[frame].pagina;
+        
+        tabelasPaginas[*pidAntigo][*paginaAntiga].valido = false;
+        tabelasPaginas[*pidAntigo][*paginaAntiga].referenciado = false;
+    }
+    // Atualizar tabela de páginas com a nova página
+    atualizarTabelaPaginas(pid, pagina, frame, true);
     
     return frame;
 }
 
-int fifoReplacement() {
-    int victimFrame = clockPointer;
-    clockPointer = (clockPointer + 1) % totalFrames;
-    
-    return victimFrame;
+int substituicaoFIFO() {
+    int vitima = ponteiroClock;
+    ponteiroClock = (ponteiroClock + 1) % totalFrames;
+    return vitima;
 }
 
-int clockReplacement() {
+int substituicaoClock() {
     while (true) {
-        if (!frames[clockPointer].referenced) {
-            int victim = clockPointer;
-            clockPointer = (clockPointer + 1) % totalFrames;
-            return victim;
-        } else {
-            frames[clockPointer].referenced = false;
-            pageTables[frames[clockPointer].pid][frames[clockPointer].page].referenced = false; 
+        if (!frames[ponteiroClock].referenciado) {
+        	// Encontrou página com R-bit = 0
+            int vitima  = ponteiroClock;
+            ponteiroClock = (ponteiroClock + 1) % totalFrames;
+            return vitima ;
+        } else {  // Dar segunda chance: zerar R-bit e continuar
+            frames[ponteiroClock].referenciado = false;
+            tabelasPaginas[frames[ponteiroClock].pid][frames[ponteiroClock].pagina ].referenciado = false; 
 
-            clockPointer = (clockPointer + 1) % totalFrames;
+            ponteiroClock = (ponteiroClock + 1) % totalFrames;
         }
     }
 }
 
-void updatePageTable(int pid, int page, int frame, bool referenced) {
-    pageTables[pid][page].frame = frame;
-    pageTables[pid][page].valid = true;
-    pageTables[pid][page].referenced = referenced;
-    
+void atualizarTabelaPaginas(int pid, int pagina, int frame, bool referenciado) {
+    // Atualizar entrada na tabela de páginas do processo
+	tabelasPaginas[pid][pagina].frame = frame;
+    tabelasPaginas[pid][pagina].valido  = true;
+    tabelasPaginas[pid][pagina].referenciado = referenciado;
+    // Atualizar informações do frame físico
     frames[frame].pid = pid;
-    frames[frame].page = page;
-    frames[frame].referenced = referenced;
+    frames[frame].pagina = pagina;
+    frames[frame].referenciado = referenciado;
 }
 
-void printHit(int pid, int address, int page, int offset, int frame) {
+void imprimirHit(int pid, int endereco, int pagina, int deslocamento, int frame) {
     printf("Acesso: PID %d, Endereço %d (Página %d, Deslocamento %d) -> HIT: Página %d (PID %d) já está no Frame %d\n", 
-           pid, address, page, offset, page, pid, frame);
+           pid, endereco, pagina, deslocamento, pagina, pid, frame);
 }
 
-void printPageFaultFree(int pid, int address, int page, int offset, int frame) {
+void imprimirPageFaultLivre(int pid, int endereco, int pagina, int deslocamento, int frame) {
     printf("Acesso: PID %d, Endereço %d (Página %d, Deslocamento %d) -> PAGE FAULT -> Página %d (PID %d) alocada no Frame livre %d\n", 
-           pid, address, page, offset, page, pid, frame);
+           pid, endereco, pagina, deslocamento, pagina, pid, frame);
 }
 
-void printPageFaultReplace(int pid, int address, int page, int offset, int oldPid, int oldPage, int frame) {
+void imprimirPageFaultSubstituicao(int pid, int endereco, int pagina, int deslocamento, int pidAntigo, int paginaAntiga, int frame) {
     printf("Acesso: PID %d, Endereço %d (Página %d, Deslocamento %d) -> PAGE FAULT -> Memória cheia. Página %d (PID %d) (Frame %d) será desalocada. -> Página %d (PID %d) alocada no Frame %d\n",
-           pid, address, page, offset, oldPage, oldPid, frame, page, pid, frame);
+           pid, endereco, pagina, deslocamento, paginaAntiga, pidAntigo, frame, pagina, pid, frame);
 }
