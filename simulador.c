@@ -60,7 +60,7 @@ int main(int argc, char *argv[]) {
 
     processAccesses(accessFile, algorithm);
 
-    printf("\n--- Simulação Finalizada (Algoritmo: %s)\n", algorithm);
+    printf("--- Simulação Finalizada (Algoritmo: %s)\n", algorithm);
     printf("Total de Acessos: %d\n", totalAccesses);
     printf("Total de Page Faults: %d\n", totalPageFaults);
 
